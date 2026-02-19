@@ -3,7 +3,6 @@ import logging
 import sqlite3
 import json
 import os
-import re
 from datetime import datetime
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter
@@ -11,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
-    ReplyKeyboardMarkup, KeyboardButton, 
+    ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton
 )
 
@@ -58,7 +57,6 @@ DB_NAME = "bot_database.db"
 def init_db():
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
-    # Таблица пользователей с полем для пути к последнему файлу списка
     cur.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -74,7 +72,6 @@ def init_db():
 
 init_db()
 
-# Вспомогательные функции для работы с БД
 def db_execute(query, params=(), fetchone=False, fetchall=False):
     conn = sqlite3.connect(DB_NAME)
     cur = conn.cursor()
@@ -103,7 +100,7 @@ def is_admin(user_id):
 
 def is_blocked(user_id):
     user = get_user(user_id)
-    return user and user[3] == 1  # is_blocked поле
+    return user and user[3] == 1
 
 def update_block_status(username, block: bool):
     db_execute("UPDATE users SET is_blocked = ? WHERE username = ?", (1 if block else 0, username))
@@ -116,19 +113,27 @@ def update_last_list_file(user_id, file_path):
 
 def get_last_list_file(user_id):
     user = get_user(user_id)
-    return user[4] if user else None  # last_list_file
+    return user[4] if user else None
 
 # ---------------------------- Работа с файлами списков ----------------------------
 SOLDIER_LISTS_DIR = "soldier_lists"
 os.makedirs(SOLDIER_LISTS_DIR, exist_ok=True)
 
+# НОВАЯ ФУНКЦИЯ: извлекает фамилию и первую букву имени из строки
+def extract_surname_initial(text: str) -> str | None:
+    """
+    Из строки вида 'Иванов Иван Петрович' возвращает 'Иванов И'
+    Если слов меньше двух, возвращает None.
+    """
+    words = text.strip().split()
+    if len(words) < 2:
+        return None
+    surname = words[0].capitalize()
+    initial = words[1][0].upper()
+    return f"{surname} {initial}"
+
 def save_soldier_list_to_file(user_id, username, soldiers_list):
-    """
-    Сохраняет список рядовых в файл: soldier_lists/{username}_{datetime}.txt
-    Удаляет предыдущий файл пользователя, если он есть.
-    Возвращает путь к сохранённому файлу.
-    """
-    # Удаляем предыдущий файл, если он есть
+    """Сохраняет список в файл, удаляя предыдущий файл пользователя."""
     old_file = get_last_list_file(user_id)
     if old_file and os.path.exists(old_file):
         try:
@@ -136,23 +141,19 @@ def save_soldier_list_to_file(user_id, username, soldiers_list):
         except Exception as e:
             logging.error(f"Не удалось удалить старый файл {old_file}: {e}")
 
-    # Формируем имя нового файла
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     safe_username = username.replace("@", "").replace("/", "_") if username else f"user_{user_id}"
     filename = f"{safe_username}_{timestamp}.txt"
     file_path = os.path.join(SOLDIER_LISTS_DIR, filename)
 
-    # Записываем список построчно
     with open(file_path, "w", encoding="utf-8") as f:
         for soldier in soldiers_list:
             f.write(soldier + "\n")
 
-    # Обновляем запись в БД
     update_last_list_file(user_id, file_path)
     return file_path
 
 def read_soldier_list_from_file(user_id):
-    """Читает последний файл списка пользователя и возвращает список строк."""
     file_path = get_last_list_file(user_id)
     if not file_path or not os.path.exists(file_path):
         return []
@@ -164,7 +165,7 @@ def build_main_menu_keyboard(is_admin: bool = False):
     kb = [
         [KeyboardButton(text="📥 Загрузить список рядовых")],
         [KeyboardButton(text="🔍 Проверить списки")],
-        [KeyboardButton(text="📋 Показать список рядовых")],   # новая кнопка
+        [KeyboardButton(text="📋 Показать список рядовых")],
         [KeyboardButton(text="📝 Отзыв")]
     ]
     if is_admin:
@@ -185,11 +186,11 @@ class RegisterState(StatesGroup):
     waiting_for_fullname = State()
 
 class LoadListState(StatesGroup):
-    waiting_for_format = State()                # выбор формата (через ; или enter)
-    waiting_for_space_after_semicolon = State() # есть ли пробел после ";"
-    waiting_for_choice = State()                # выбор способа загрузки (файл/текст)
-    waiting_for_file = State()                  # ожидание файла
-    waiting_for_text = State()                   # ожидание текста
+    waiting_for_format = State()
+    waiting_for_space_after_semicolon = State()
+    waiting_for_choice = State()
+    waiting_for_file = State()
+    waiting_for_text = State()
 
 class CheckListState(StatesGroup):
     waiting_for_input = State()
@@ -237,34 +238,13 @@ async def process_fullname(message: types.Message, state: FSMContext):
         reply_markup=build_main_menu_keyboard(is_admin(user_id))
     )
 
-@dp.message(F.text == "📋 Показать список рядовых")
-async def show_soldier_list(message: types.Message):
-    user_id = message.from_user.id
-    if is_blocked(user_id):
-        await message.answer("Вы заблокированы.")
-        return
-    soldiers = read_soldier_list_from_file(user_id)
-    if not soldiers:
-        await message.answer("Список рядовых пуст. Сначала загрузите список через меню.")
-        return
-    # Формируем пронумерованный список
-    lines = [f"{i+1}. {name}" for i, name in enumerate(soldiers)]
-    result = "Ваш список рядовых:\n" + "\n".join(lines)
-    # Если список слишком длинный, разбиваем на несколько сообщений
-    if len(result) > 4096:
-        for x in range(0, len(result), 4096):
-            await message.answer(result[x:x+4096])
-    else:
-        await message.answer(result)
-
-# ---------------------------- Загрузка списка рядовых (новый порядок) ----------------------------
+# ---------------------------- Загрузка списка рядовых ----------------------------
 @dp.message(F.text == "📥 Загрузить список рядовых")
 async def load_list_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     if is_blocked(user_id):
         await message.answer("Вы заблокированы.")
         return
-    # Сначала спрашиваем формат
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="Через точку с запятой (;)", callback_data="format_semicolon")],
         [InlineKeyboardButton(text="Через Enter", callback_data="format_enter")]
@@ -276,7 +256,6 @@ async def load_list_start(message: types.Message, state: FSMContext):
 async def process_format(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data == "format_semicolon":
-        # Уточняем про пробел после ";"
         await state.set_state(LoadListState.waiting_for_space_after_semicolon)
         await state.update_data(format='semicolon')
         kb = InlineKeyboardMarkup(inline_keyboard=[
@@ -284,9 +263,8 @@ async def process_format(callback: types.CallbackQuery, state: FSMContext):
             [InlineKeyboardButton(text="Нет", callback_data="space_no")]
         ])
         await callback.message.edit_text("Есть ли пробел после ';'?", reply_markup=kb)
-    else:  # enter
+    else:
         await state.update_data(format='enter', space=False)
-        # Переходим к выбору способа загрузки
         await ask_upload_method(callback.message, state)
 
 @dp.callback_query(lambda c: c.data in ["space_yes", "space_no"], StateFilter(LoadListState.waiting_for_space_after_semicolon))
@@ -294,7 +272,6 @@ async def process_space(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     has_space = (callback.data == "space_yes")
     await state.update_data(space=has_space)
-    # Переходим к выбору способа загрузки
     await ask_upload_method(callback.message, state)
 
 async def ask_upload_method(message: types.Message, state: FSMContext):
@@ -310,33 +287,31 @@ async def upload_choice(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
     if callback.data == "upload_file":
         await state.set_state(LoadListState.waiting_for_file)
+        # ИЗМЕНЕНО: текст подсказки
         await callback.message.edit_text(
-            "Отправьте файл со списком рядовых (текстовый файл).\n"
-            "Формат: каждая строка должна содержать фамилию и первую букву имени (например, Иванов И)."
+            "Отправьте файл со списком ФИО рядовых (текстовый файл).\n"
+            "Бот автоматически выделит фамилию и первую букву имени."
         )
     else:
         await state.set_state(LoadListState.waiting_for_text)
+        # ИЗМЕНЕНО: текст подсказки
         await callback.message.edit_text(
-            "Введите список рядовых текстом.\n"
-            "Формат: каждая строка должна содержать фамилию и первую букву имени (например, Иванов И)."
+            "Введите список ФИО рядовых текстом.\n"
+            "Бот автоматически выделит фамилию и первую букву имени."
         )
 
-# Обработка текстового ввода
 @dp.message(F.text, StateFilter(LoadListState.waiting_for_text))
 async def load_text(message: types.Message, state: FSMContext):
     raw_text = message.text
     data = await state.get_data()
     format_type = data.get('format')
     space = data.get('space', False)
-
     soldiers = parse_soldier_list(raw_text, format_type, space)
     if not soldiers:
-        await message.answer("Не удалось извлечь ни одной записи. Проверьте формат и попробуйте снова.")
+        await message.answer("Не удалось извлечь ни одной записи. Проверьте, что каждая строка содержит фамилию и имя.")
         return
-
     await save_and_notify(message, state, soldiers)
 
-# Обработка файлового ввода
 @dp.message(F.document, StateFilter(LoadListState.waiting_for_file))
 async def load_file(message: types.Message, state: FSMContext):
     document = message.document
@@ -346,35 +321,32 @@ async def load_file(message: types.Message, state: FSMContext):
     file = await bot.get_file(document.file_id)
     file_content = await bot.download_file(file.file_path)
     raw_text = file_content.read().decode('utf-8')
-
     data = await state.get_data()
     format_type = data.get('format')
     space = data.get('space', False)
-
     soldiers = parse_soldier_list(raw_text, format_type, space)
     if not soldiers:
-        await message.answer("Не удалось извлечь ни одной записи из файла. Проверьте формат и попробуйте снова.")
+        await message.answer("Не удалось извлечь ни одной записи из файла. Проверьте, что каждая строка содержит фамилию и имя.")
         return
-
     await save_and_notify(message, state, soldiers)
 
+# ИЗМЕНЕНА функция parse_soldier_list: теперь применяет extract_surname_initial к каждому элементу
 def parse_soldier_list(raw_text: str, format_type: str, space: bool) -> list:
-    """Парсит сырой текст в зависимости от формата и возвращает список строк (фамилия + инициал)"""
     lines = []
     if format_type == 'enter':
-        # Разделяем по строкам
-        lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
+        raw_lines = [line.strip() for line in raw_text.splitlines() if line.strip()]
     elif format_type == 'semicolon':
-        # Разделяем по ";"
-        if space:
-            # Предполагаем, что после ";" есть пробел, но split(";") всё равно уберёт его, потом strip()
-            parts = raw_text.split(';')
-        else:
-            parts = raw_text.split(';')
-        lines = [p.strip() for p in parts if p.strip()]
-    # Дополнительно можно проверить, что каждая строка соответствует формату "Фамилия И"
-    # Но пока просто возвращаем как есть
-    return lines
+        parts = raw_text.split(';')
+        raw_lines = [p.strip() for p in parts if p.strip()]
+    else:
+        raw_lines = []
+    # Применяем extract_surname_initial и отбрасываем None
+    soldiers = []
+    for line in raw_lines:
+        extracted = extract_surname_initial(line)
+        if extracted:
+            soldiers.append(extracted)
+    return soldiers
 
 async def save_and_notify(message: types.Message, state: FSMContext, soldiers):
     user_id = message.from_user.id
@@ -383,6 +355,25 @@ async def save_and_notify(message: types.Message, state: FSMContext, soldiers):
     file_path = save_soldier_list_to_file(user_id, username, soldiers)
     await state.clear()
     await message.answer(f"Список сохранён в файл. Всего рядовых: {len(soldiers)}")
+
+# ---------------------------- Показать список рядовых ----------------------------
+@dp.message(F.text == "📋 Показать список рядовых")
+async def show_soldier_list(message: types.Message):
+    user_id = message.from_user.id
+    if is_blocked(user_id):
+        await message.answer("Вы заблокированы.")
+        return
+    soldiers = read_soldier_list_from_file(user_id)
+    if not soldiers:
+        await message.answer("Список рядовых пуст. Сначала загрузите список через меню.")
+        return
+    lines = [f"{i+1}. {name}" for i, name in enumerate(soldiers)]
+    result = "Ваш список рядовых:\n" + "\n".join(lines)
+    if len(result) > 4096:
+        for i in range(0, len(result), 4096):
+            await message.answer(result[i:i+4096])
+    else:
+        await message.answer(result)
 
 # ---------------------------- Проверка списков ----------------------------
 @dp.message(F.text == "🔍 Проверить списки")
