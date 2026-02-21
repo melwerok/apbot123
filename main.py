@@ -118,7 +118,13 @@ def update_block_status(username, block: bool):
     db_execute("UPDATE users SET is_blocked = ? WHERE username = ?", (1 if block else 0, username))
 
 def get_all_users():
+    """Возвращает список всех пользователей (user_id, username, full_name, is_blocked)"""
     return db_execute("SELECT user_id, username, full_name, is_blocked FROM users", fetchall=True)
+
+def get_active_users():
+    """Возвращает список ID активных пользователей (не заблокированных)"""
+    users = db_execute("SELECT user_id FROM users WHERE is_blocked = 0", fetchall=True)
+    return [row[0] for row in users] if users else []
 
 def update_last_list_file(user_id, file_path):
     db_execute("UPDATE users SET last_list_file = ? WHERE user_id = ?", (file_path, user_id))
@@ -204,7 +210,7 @@ def read_group_list_from_file(group_id: int) -> list[str]:
     with open(file_path, "r", encoding="utf-8") as f:
         return [line.strip() for line in f if line.strip()]
 
-# ---------------------------- Проверка на администратора группы ----------------------------
+# ---------------------------- Проверка на администратора группы (исправлено) ----------------------------
 async def is_group_admin(chat_id: int, user_id: int) -> bool:
     try:
         member = await bot.get_chat_member(chat_id, user_id)
@@ -215,27 +221,25 @@ async def is_group_admin(chat_id: int, user_id: int) -> bool:
 
 # ---------------------------- Клавиатуры ----------------------------
 def build_main_menu_keyboard(is_admin: bool = False):
-    # Изменено: "📝 Отзыв" -> "📝 Отзыв или поддержка"
     kb = [
         [KeyboardButton(text="📥 Загрузить список рядовых")],
         [KeyboardButton(text="🔍 Проверить списки")],
         [KeyboardButton(text="📋 Показать список рядовых")],
-        [KeyboardButton(text="📝 Отзыв или поддержка")]
+        [KeyboardButton(text="📝 Отзыв или поддержка")]  # изменено
     ]
     if is_admin:
         kb.append([KeyboardButton(text="🛠 Админ-панель")])
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 
 def admin_panel_keyboard():
-    # Добавлена кнопка "📢 Написать всем"
     kb = [
         [InlineKeyboardButton(text="👥 Список пользователей", callback_data="admin_list_users")],
         [InlineKeyboardButton(text="🔒 Заблокировать пользователя", callback_data="admin_block_user")],
         [InlineKeyboardButton(text="🔓 Разблокировать пользователя", callback_data="admin_unblock_user")],
-        [InlineKeyboardButton(text="📢 Написать всем", callback_data="admin_broadcast")],
+        [InlineKeyboardButton(text="📨 Написать всем", callback_data="admin_broadcast")],  # новая кнопка
         [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=kb)
+    return InlineKeyboardMarkup(inline_keyboard=[kb])
 
 # ---------------------------- Машины состояний (FSM) ----------------------------
 class RegisterState(StatesGroup):
@@ -257,7 +261,23 @@ class FeedbackState(StatesGroup):
 class AdminState(StatesGroup):
     waiting_for_username_to_block = State()
     waiting_for_username_to_unblock = State()
-    waiting_for_broadcast = State()  # Новое состояние для рассылки
+    waiting_for_broadcast = State()  # новое состояние для рассылки
+
+# ---------------------------- Вспомогательная функция проверки регистрации ----------------------------
+async def check_registration(message: types.Message) -> bool:
+    """Проверяет, зарегистрирован ли пользователь в личном чате.
+       Если нет или заблокирован, отправляет соответствующее сообщение и возвращает False."""
+    if message.chat.type != "private":
+        return True  # в группах регистрация не требуется
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.answer("Пожалуйста, сначала зарегистрируйтесь, отправив /start")
+        return False
+    if user[3] == 1:
+        await message.answer("Вы заблокированы.")
+        return False
+    return True
 
 # ---------------------------- Хэндлеры личных сообщений ----------------------------
 @dp.message(CommandStart())
@@ -303,7 +323,7 @@ async def process_fullname(message: types.Message, state: FSMContext):
 # Личная загрузка списка (с кнопками)
 @dp.message(F.text == "📥 Загрузить список рядовых")
 async def load_list_start_private(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
+    if not await check_registration(message):
         return
     user_id = message.from_user.id
     if is_blocked(user_id):
@@ -375,6 +395,9 @@ async def load_text(message: types.Message, state: FSMContext):
         return
 
     if message.chat.type == "private":
+        if not await check_registration(message):
+            await state.clear()
+            return
         user_id = message.from_user.id
         user = get_user(user_id)
         username = message.from_user.username or f"user_{user_id}"
@@ -414,6 +437,9 @@ async def load_file(message: types.Message, state: FSMContext):
         return
 
     if message.chat.type == "private":
+        if not await check_registration(message):
+            await state.clear()
+            return
         user_id = message.from_user.id
         user = get_user(user_id)
         username = message.from_user.username or f"user_{user_id}"
@@ -454,7 +480,7 @@ def parse_soldier_list(raw_text: str, format_type: str, space: bool) -> list:
 # Личная проверка списков (с кнопкой)
 @dp.message(F.text == "🔍 Проверить списки")
 async def check_list_start_private(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
+    if not await check_registration(message):
         return
     user_id = message.from_user.id
     if is_blocked(user_id):
@@ -470,7 +496,7 @@ async def check_list_start_private(message: types.Message, state: FSMContext):
 # Показать личный список
 @dp.message(F.text == "📋 Показать список рядовых")
 async def show_soldier_list_private(message: types.Message):
-    if message.chat.type != "private":
+    if not await check_registration(message):
         return
     user_id = message.from_user.id
     if is_blocked(user_id):
@@ -524,10 +550,10 @@ async def cmd_checkpeople_group(message: types.Message):
     else:
         await message.answer(result)
 
-# ---------------------------- Автоматическая проверка сообщений в группах (с проверкой состояния) ----------------------------
+# ---------------------------- Автоматическая проверка сообщений в группах ----------------------------
 @dp.message(F.chat.type.in_({"group", "supergroup"}))
 async def auto_check_group_message(message: types.Message, state: FSMContext):
-    # Если у пользователя есть активное состояние — пропускаем
+    # Если у пользователя есть активное состояние — пропускаем, не мешаем
     current_state = await state.get_state()
     if current_state is not None:
         return
@@ -552,28 +578,66 @@ async def auto_check_group_message(message: types.Message, state: FSMContext):
         result = "Найденные рядовые в сообщении:\n" + "\n".join(f"{i+1}. {name}" for i, name in enumerate(found))
         await message.reply(result)
 
-# ---------------------------- Отзыв или поддержка (изменён текст) ----------------------------
+# ---------------------------- Обработка проверки (текст/файл) для личных сообщений ----------------------------
+@dp.message(F.document, StateFilter(CheckListState.waiting_for_input))
+async def check_file_private(message: types.Message, state: FSMContext):
+    if not await check_registration(message):
+        await state.clear()
+        return
+    document = message.document
+    if not document.file_name.endswith('.txt'):
+        await message.answer("Пожалуйста, отправьте текстовый файл (.txt).")
+        return
+    file = await bot.get_file(document.file_id)
+    file_content = await bot.download_file(file.file_path)
+    text = file_content.read().decode('utf-8')
+    await perform_check_private(message, text, state)
+
+@dp.message(F.text, StateFilter(CheckListState.waiting_for_input))
+async def check_text_private(message: types.Message, state: FSMContext):
+    if not await check_registration(message):
+        await state.clear()
+        return
+    await perform_check_private(message, message.text, state)
+
+async def perform_check_private(message: types.Message, text: str, state: FSMContext):
+    user_id = message.from_user.id
+    soldiers = read_soldier_list_from_file(user_id)
+    text_lower = text.lower()
+    found = []
+    for s in soldiers:
+        if s.lower() in text_lower:
+            found.append(s)
+    if found:
+        result = "Найденные рядовые:\n" + "\n".join(f"{i+1}. {name}" for i, name in enumerate(found))
+    else:
+        result = "Никого не найдено."
+    await state.clear()
+    await message.answer(result)
+
+# ---------------------------- Отзыв или поддержка (изменено) ----------------------------
 @dp.message(F.text == "📝 Отзыв или поддержка")
 async def feedback_start_private(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
+    if not await check_registration(message):
         return
     user_id = message.from_user.id
     if is_blocked(user_id):
         await message.answer("Вы заблокированы.")
         return
     await state.set_state(FeedbackState.waiting_for_feedback)
-    await message.answer("Напишите ваш отзыв или вопрос в службу поддержки. При желании можно прикрепить фото.")
+    await message.answer("Напишите ваш отзыв или вопрос в службу поддержки. Можно прикрепить фото.")
 
 @dp.message(F.text | F.photo, StateFilter(FeedbackState.waiting_for_feedback))
 async def feedback_receive_private(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
+    if not await check_registration(message):
+        await state.clear()
         return
     user_id = message.from_user.id
     user = get_user(user_id)
     full_name = user[2] if user else "Неизвестно"
     username = message.from_user.username or f"id{user_id}"
 
-    caption = f"📬 Сообщение от {full_name} (@{username}):\n\n"
+    caption = f"📬 Отзыв/поддержка от {full_name} (@{username}):\n\n"
     if message.text:
         caption += message.text
     elif message.caption:
@@ -650,7 +714,7 @@ async def admin_unblock_user_process(message: types.Message, state: FSMContext):
     await message.answer(f"Пользователь @{username} разблокирован.")
     await state.clear()
 
-# ---------------------------- Рассылка сообщений всем пользователям (новая функция) ----------------------------
+# ---------------------------- Рассылка всем пользователям (новый функционал) ----------------------------
 @dp.callback_query(lambda c: c.data == "admin_broadcast")
 async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext):
     if callback.message.chat.type != "private" or not is_admin(callback.from_user.id):
@@ -658,85 +722,48 @@ async def admin_broadcast_start(callback: types.CallbackQuery, state: FSMContext
         return
     await state.set_state(AdminState.waiting_for_broadcast)
     await callback.message.edit_text(
-        "Отправьте сообщение для рассылки всем пользователям бота.\n"
-        "Это может быть текст, фото, видео или документ.\n"
-        "Для отмены введите /cancel"
+        "Отправьте сообщение для рассылки всем пользователям (можно текст или фото с подписью).\n"
+        "Сообщение будет доставлено всем активным пользователям бота."
     )
 
-@dp.message(AdminState.waiting_for_broadcast, F.text | F.photo | F.video | F.document)
+@dp.message(AdminState.waiting_for_broadcast, F.text | F.photo)
 async def admin_broadcast_send(message: types.Message, state: FSMContext):
-    if message.chat.type != "private" or not is_admin(message.from_user.id):
+    if not is_admin(message.from_user.id):
+        await state.clear()
         return
 
-    # Получаем список всех пользователей (кроме заблокированных)
-    users = get_all_users()
-    # Фильтруем незаблокированных
-    active_users = [u for u in users if not u[3]]  # u[3] - is_blocked
-
-    if not active_users:
+    # Получаем список активных пользователей
+    users = get_active_users()
+    if not users:
         await message.answer("Нет активных пользователей для рассылки.")
         await state.clear()
         return
 
-    await message.answer(f"Начинаю рассылку {len(active_users)} пользователям...")
-
     success_count = 0
     fail_count = 0
 
-    for user in active_users:
-        user_id = user[0]
+    # Рассылаем сообщение каждому пользователю
+    for uid in users:
         try:
-            # Копируем сообщение (отправляем такое же, как от админа)
             if message.photo:
+                # Отправляем фото с подписью
                 await bot.send_photo(
-                    chat_id=user_id,
-                    photo=message.photo[-1].file_id,
-                    caption=message.caption,
-                    parse_mode="HTML"
+                    uid,
+                    message.photo[-1].file_id,
+                    caption=message.caption or "Рассылка от администратора"
                 )
-            elif message.video:
-                await bot.send_video(
-                    chat_id=user_id,
-                    video=message.video.file_id,
-                    caption=message.caption,
-                    parse_mode="HTML"
-                )
-            elif message.document:
-                await bot.send_document(
-                    chat_id=user_id,
-                    document=message.document.file_id,
-                    caption=message.caption,
-                    parse_mode="HTML"
-                )
-            elif message.text:
-                await bot.send_message(
-                    chat_id=user_id,
-                    text=message.text,
-                    parse_mode="HTML"
-                )
+            else:
+                # Отправляем текст
+                await bot.send_message(uid, message.text)
             success_count += 1
         except Exception as e:
-            logging.error(f"Не удалось отправить сообщение пользователю {user_id}: {e}")
+            logging.error(f"Не удалось отправить сообщение пользователю {uid}: {e}")
             fail_count += 1
 
-        # Небольшая задержка, чтобы не превысить лимиты Telegram
-        await asyncio.sleep(0.05)
-
-    await message.answer(
-        f"Рассылка завершена.\n"
-        f"✅ Успешно: {success_count}\n"
-        f"❌ Ошибок: {fail_count}"
-    )
+    await message.answer(f"Рассылка завершена.\nУспешно: {success_count}\nНеудачно: {fail_count}")
     await state.clear()
 
-# Обработчик отмены во время рассылки
-@dp.message(Command("cancel"), StateFilter(AdminState.waiting_for_broadcast))
-async def cancel_broadcast(message: types.Message, state: FSMContext):
-    if message.chat.type != "private":
-        return
-    await state.clear()
-    await message.answer("Рассылка отменена.", reply_markup=build_main_menu_keyboard(is_admin(message.from_user.id)))
-
+# ---------------------------- Назад в админ-панель ----------------------------
 @dp.callback_query(lambda c: c.data == "admin_back")
 async def admin_back(callback: types.CallbackQuery):
     if callback.message.chat.type != "private" or not is_admin(callback.from_user.id):
@@ -748,12 +775,31 @@ async def admin_back(callback: types.CallbackQuery):
         reply_markup=build_main_menu_keyboard(is_admin=True)
     )
 
+# ---------------------------- Обработчик любых сообщений в личке от незарегистрированных ----------------------------
+@dp.message(F.chat.type == "private")
+async def handle_unregistered_private(message: types.Message):
+    # Если сообщение не обработано ни одним из предыдущих хэндлеров (в том числе не команда и не состояние)
+    # Проверим, зарегистрирован ли пользователь. Если нет — напомним.
+    user_id = message.from_user.id
+    user = get_user(user_id)
+    if not user:
+        await message.answer("Пожалуйста, сначала зарегистрируйтесь, отправив /start")
+        return
+    if user[3] == 1:
+        await message.answer("Вы заблокированы.")
+        return
+    # Если дошло сюда, значит пользователь зарегистрирован, но сообщение не подошло ни под один хэндлер.
+    # Можно проигнорировать или дать общую подсказку.
+    await message.answer("Используйте кнопки меню для навигации.")
+
 # ---------------------------- Установка команд для отображения в меню ----------------------------
 async def set_commands():
+    # Команды для личных чатов
     await bot.set_my_commands([
         types.BotCommand(command="start", description="Начать работу с ботом")
     ], scope=types.BotCommandScopeAllPrivateChats())
 
+    # Команды для групп
     await bot.set_my_commands([
         types.BotCommand(command="addpeople", description="Загрузить список рядовых (только админы)"),
         types.BotCommand(command="checkpeople", description="Показать список группы (только админы)")
