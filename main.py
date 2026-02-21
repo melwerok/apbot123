@@ -239,7 +239,7 @@ def admin_panel_keyboard():
         [InlineKeyboardButton(text="📨 Написать всем", callback_data="admin_broadcast")],  # новая кнопка
         [InlineKeyboardButton(text="◀️ Назад", callback_data="admin_back")]
     ]
-    return InlineKeyboardMarkup(inline_keyboard=[kb])
+    return InlineKeyboardMarkup(inline_keyboard=kb)
 
 # ---------------------------- Машины состояний (FSM) ----------------------------
 class RegisterState(StatesGroup):
