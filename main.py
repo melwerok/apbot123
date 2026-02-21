@@ -807,7 +807,12 @@ async def set_commands():
 
 # ---------------------------- Запуск бота ----------------------------
 async def main():
-    await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logging.info("Вебхук успешно удалён")
+    except Exception as e:
+        logging.error(f"Не удалось удалить вебхук: {e}")
+        # Продолжаем запуск, так как это не критично
     await set_commands()
     await dp.start_polling(bot)
 
